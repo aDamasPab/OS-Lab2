@@ -183,17 +183,64 @@ FS::create(std::string filepath) {
 
 // cat <filepath> reads the content of a file and prints it on the screen
 int
-FS::cat(std::string filepath)
-{
-    std::cout << "FS::cat(" << filepath << ")\n";
+FS::cat(std::string filepath) {
+    // read current directory
+    uint8_t dir_buffer[BLOCK_SIZE];
+    disk.read(current_dir_block, dir_buffer);
+    dir_entry* entries = (dir_entry*)dir_buffer;
+
+    // find file in current directory
+    int idx = find_file_in_current_dir(filepath, entries);
+    if (idx == -1) {
+        std::cout << "FS::cat(): Error - file not found\n";
+        return -1;
+    }
+
+    // verify that it is a file
+    if (entries[idx].type != TYPE_FILE) {
+        std::cout << "FS::cat(): Error - not a file\n";
+        return -1;
+    }
+
+    // read blocks following the FAT chain
+    uint16_t current_block = entries[idx].first_blk;
+    uint32_t remaining_size = entries[idx].size;
+
+    if (remaining_size == 0 || current_block == 0 || current_block == FAT_EOF) return 0; // empty file
+
+    uint8_t data_buffer[BLOCK_SIZE];
+
+    while (current_block != FAT_EOF && remaining_size > 0) {
+        disk.read(current_block, data_buffer);
+        int to_print = std::min((uint32_t)BLOCK_SIZE, remaining_size);
+        std::cout.write((char*)data_buffer, to_print);
+        remaining_size -= to_print;
+        current_block = fat[current_block]; // next block in FAT chain
+    }
+
+    std::cout << std::endl;
+
     return 0;
 }
 
 // ls lists the content in the currect directory (files and sub-directories)
 int
-FS::ls()
-{
-    std::cout << "FS::ls()\n";
+FS::ls() {
+    // read current directory
+    uint8_t dir_buffer[BLOCK_SIZE];
+    if (disk.read(current_dir_block, dir_buffer) != 0) {
+        std::cout << "FS::ls(): Error - could not read current directory\n";
+        return -1;
+    }
+
+    dir_entry* entries = (dir_entry*)dir_buffer;
+    int max_entries = BLOCK_SIZE / sizeof(dir_entry);
+
+    std::cout << "name\tsize\n";
+    for (unsigned i = 0; i < max_entries; ++i) {
+        if (entries[i].file_name[0] != '\0') std::cout << entries[i].file_name << "\t" << entries[i].size << "\n";
+    }
+
     return 0;
 }
 
