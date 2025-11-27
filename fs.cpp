@@ -1,29 +1,95 @@
 #include <iostream>
+#include <vector>
+#include <cstring>
+#include <string>
+#include <algorithm>
 #include "fs.h"
 
-FS::FS()
-{
-    std::cout << "FS::FS()... Creating file system\n";
+// ============ PRIVATE AUXILIARY METHODS ============
+
+void FS::save_fat() {
+    // FAT is always stored in block 1
+    disk.write(FAT_BLOCK, (uint8_t*)fat);
 }
 
-FS::~FS()
-{
+int FS::find_free_block() {
+    // find form second block (block 0 is root, block 1 is FAT)
+    for (int i = 2; i < disk.get_no_blocks(); ++i) {
+        if (fat[i] == FAT_FREE) {
+            return i;
+        }
+    }
+    // no free block found
+    return -1;
+}
+
+int FS::find_file_in_current_dir(const std::string& filename, dir_entry* entries) {
+    int max_entries = BLOCK_SIZE / sizeof(dir_entry);
+    for (int i = 0; i < max_entries; ++i) {
+        // check if entry is used
+        if (entries[i].file_name[0] != '\0') {
+            if (filename == std::string(entries[i].file_name)) {
+                return i;
+            }
+        }
+    }
+    // file not found
+    return -1;
+}
+
+int FS::find_free_entry_in_current_dir(dir_entry* entries) {
+    int max_entries = BLOCK_SIZE / sizeof(dir_entry);
+    for (int i = 0; i < max_entries; ++i) {
+        // check if entry is free
+        if (entries[i].file_name[0] == '\0') {
+            return i;
+        }
+    }
+    // no free entry found
+    return -1;
+}
+
+
+
+// ================= PUBLIC METHODS ==================
+
+FS::FS() {
+    std::cout << "FS::FS()... Creating file system\n";
+    disk.read(FAT_BLOCK, (uint8_t*)fat); // read FAT form disk
+    current_dir_block = ROOT_BLOCK; // set current directory to root
+}
+
+FS::~FS() {
 
 }
 
 // formats the disk, i.e., creates an empty file system
 int
-FS::format()
-{
-    std::cout << "FS::format()\n";
+FS::format() {
+    // initialize FAT
+    for (unsigned i = 0; i < disk.get_no_blocks(); ++i) {
+        fat[i] = FAT_FREE;
+    }
+    // reserve block 0 (root) and block 1 (FAT)
+    fat[ROOT_BLOCK] = FAT_EOF;
+    fat[FAT_BLOCK] = FAT_EOF;
+    save_fat();
+
+    // clean root directory (block 0)
+    uint8_t zero_block[BLOCK_SIZE];
+    memset(zero_block, 0, BLOCK_SIZE);
+    disk.write(ROOT_BLOCK, zero_block);
+
+    // restart current position
+    current_dir_block = ROOT_BLOCK;
+
     return 0;
 }
 
 // create <filepath> creates a new file on the disk, the data content is
 // written on the following rows (ended with an empty row)
 int
-FS::create(std::string filepath)
-{
+FS::create(std::string filepath) {
     std::cout << "FS::create(" << filepath << ")\n";
     return 0;
 }
