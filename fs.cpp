@@ -90,7 +90,94 @@ FS::format() {
 // written on the following rows (ended with an empty row)
 int
 FS::create(std::string filepath) {
-    std::cout << "FS::create(" << filepath << ")\n";
+    // check filename length
+    if (filepath.length() > 55) {
+        std::cout << "FS::create(): Error - filename too long\n";
+        return -1;
+    }
+
+    // read current directory
+    uint8_t dir_buffer[BLOCK_SIZE];
+    disk.read(current_dir_block, dir_buffer);
+    dir_entry* entries = (dir_entry*)dir_buffer;
+
+    // check if file already exists
+    if (find_file_in_current_dir(filepath, entries) != -1) {
+        std::cout << "FS::create(): Error - file already exists\n";
+        return -1;
+    }
+
+    // find free entry in current directory
+    int entry_idx = find_free_entry_in_current_dir(entries);
+    if (entry_idx == -1) {
+        std::cout << "FS::create(): Error - no free directory entry\n";
+        return -1;
+    }
+
+    // read user input
+    std::string content = "";
+    std::string line;
+
+    while (std::getline(std::cin, line) && !line.empty()) {
+        content += line + "\n";
+    }
+    
+    // calculate number of blocks needed
+    uint32_t file_size = content.size();
+    int blocks_needed = (file_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    if (file_size == 0) blocks_needed = 0; // empty file
+
+    int first_block = FAT_EOF;
+    int previous_block = -1;
+
+    if (blocks_needed > 0) {
+        int bytes_written = 0;
+
+        for (unsigned i = 0; i < blocks_needed; ++i) {
+            int new_block = find_free_block();
+            if (new_block == -1) {
+                std::cout << "FS::create(): Error - not enough disk space\n";
+                return -2; // no free block available
+            }
+
+            fat[new_block] = FAT_EOF; // mark new block as end of file for now
+
+            if (first_block == FAT_EOF) first_block = new_block;
+            if (previous_block != -1) fat[previous_block] = new_block; // link previous block to new block
+
+            // prepare data to the block
+            uint8_t data_buffer[BLOCK_SIZE];
+            memset(data_buffer, 0, BLOCK_SIZE);
+
+            // write data to block
+            int chunk_size = std::min((int)BLOCK_SIZE, (int)(file_size - bytes_written));
+            memcpy(data_buffer, content.c_str() + bytes_written, chunk_size);
+
+            disk.write(new_block, data_buffer);
+
+            previous_block = new_block;
+            bytes_written += chunk_size;
+        }
+
+    } else {
+        // empty file
+        first_block = FAT_EOF;
+    }
+
+    // save updated FAT
+    save_fat();
+
+    // update directory entry
+    strncpy(entries[entry_idx].file_name, filepath.c_str(),55);
+    entries[entry_idx].file_name[55] = '\0'; // 
+    entries[entry_idx].size = file_size;
+    entries[entry_idx].first_blk = (first_block == FAT_BLOCK) ? 0 : first_block; // 0 or FAT_EOF representation
+    entries[entry_idx].type = TYPE_FILE;
+    entries[entry_idx].access_rights = READ | WRITE; // rw-
+
+    // write updated direcory into the disk
+    disk.write(current_dir_block, dir_buffer);
+
     return 0;
 }
 
