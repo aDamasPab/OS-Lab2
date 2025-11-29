@@ -356,9 +356,6 @@ int FS::cp(std::string sourcepath, std::string destpath)
 // or moves the file <sourcepath> to the directory <destpath> (if dest is a directory)
 int FS::mv(std::string sourcepath, std::string destpath)
 {
-    uint8_t blockBuffer[BLOCK_SIZE];
-    disk.read(ROOT_BLOCK, blockBuffer);
-    dir_entry* root = (dir_entry*)blockBuffer;
 
     // 1. Cargar Root
     uint8_t blockBuffer[BLOCK_SIZE];
