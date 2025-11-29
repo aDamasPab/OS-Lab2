@@ -356,23 +356,236 @@ int FS::cp(std::string sourcepath, std::string destpath)
 // or moves the file <sourcepath> to the directory <destpath> (if dest is a directory)
 int FS::mv(std::string sourcepath, std::string destpath)
 {
-    std::cout << "FS::mv(" << sourcepath << "," << destpath << ")\n";
+    uint8_t blockBuffer[BLOCK_SIZE];
+    disk.read(ROOT_BLOCK, blockBuffer);
+    dir_entry* root = (dir_entry*)blockBuffer;
+
+    // 1. Cargar Root
+    uint8_t blockBuffer[BLOCK_SIZE];
+    disk.read(ROOT_BLOCK, blockBuffer);
+    dir_entry* root = (dir_entry*)blockBuffer;
+
+    // 2. Buscar origen
+    int srcIdx = -1;
+    for (int i = 0; i < BLOCK_SIZE / sizeof(dir_entry); ++i) {
+        if (strcmp(root[i].file_name, sourcepath.c_str()) == 0) {
+            srcIdx = i;
+            break;
+        }
+    }
+
+    if (srcIdx == -1) {
+        std::cout << "Error: File not found.\n";
+        return -1;
+    }
+
+    // 3. Verificar destino (Noclobber)
+    for (int i = 0; i < BLOCK_SIZE / sizeof(dir_entry); ++i) {
+        if (strcmp(root[i].file_name, destpath.c_str()) == 0) {
+            std::cout << "Error: Destination file already exists.\n";
+            return -1;
+        }
+    }
+
+    // 4. Renombrar
+    // Como es un sistema de un solo nivel (por ahora), mv es solo renombrar.
+    memset(root[srcIdx].file_name, 0, 56);
+    strcpy(root[srcIdx].file_name, destpath.c_str());
+
+    // 5. Guardar
+    disk.write(ROOT_BLOCK, (uint8_t*)root);
+
     return 0;
+
+    std::cout << "FS::mv(" << sourcepath << "," << destpath << ")\n";
 }
 
 // rm <filepath> removes / deletes the file <filepath>
 int FS::rm(std::string filepath)
 {
-    std::cout << "FS::rm(" << filepath << ")\n";
+    // 1. Cargar
+    uint8_t blockBuffer[BLOCK_SIZE];
+    disk.read(ROOT_BLOCK, blockBuffer);
+    dir_entry* root = (dir_entry*)blockBuffer;
+    
+    disk.read(FAT_BLOCK, (uint8_t*)fat);
+
+    // 2. Buscar archivo
+    int idx = -1;
+    for (int i = 0; i < BLOCK_SIZE / sizeof(dir_entry); ++i) {
+        if (strcmp(root[i].file_name, filepath.c_str()) == 0) {
+            idx = i;
+            break;
+        }
+    }
+
+    if (idx == -1) {
+        std::cout << "Error: File not found.\n";
+        return -1;
+    }
+
+    // 3. Liberar bloques en la FAT
+    int curr = root[idx].first_blk;
+    // Asumimos que first_blk es válido si size > 0. 
+    // Si size es 0, first_blk podría ser FAT_EOF o 0, verificamos.
+    if (root[idx].size > 0 && curr != FAT_EOF && curr != 0) {
+        while (curr != FAT_EOF && curr != FAT_FREE) {
+            int next = fat[curr];
+            fat[curr] = FAT_FREE; // Marcar libre
+            curr = next;
+        }
+    }
+
+    // 4. Liberar entrada de directorio
+    // Limpiamos todo el struct o solo ponemos el primer char del nombre a 0
+    memset(&root[idx], 0, sizeof(dir_entry)); 
+
+    // 5. Guardar
+    disk.write(FAT_BLOCK, (uint8_t*)fat);
+    disk.write(ROOT_BLOCK, (uint8_t*)root);
+
     return 0;
+
+    std::cout << "FS::rm(" << filepath << ")\n";
 }
 
 // append <filepath1> <filepath2> appends the contents of file <filepath1> to
 // the end of file <filepath2>. The file <filepath1> is unchanged.
 int FS::append(std::string filepath1, std::string filepath2)
 {
-    std::cout << "FS::append(" << filepath1 << "," << filepath2 << ")\n";
+    if (filepath1 == filepath2) {
+        std::cout << "Error: Cannot append file to itself.\n";
+        return -1;
+    }
+
+    // 1. Cargar estructuras
+    uint8_t rootBuf[BLOCK_SIZE];
+    disk.read(ROOT_BLOCK, rootBuf);
+    dir_entry* root = (dir_entry*)rootBuf;
+    disk.read(FAT_BLOCK, (uint8_t*)fat);
+
+    // 2. Encontrar archivos
+    int idx1 = -1, idx2 = -1;
+    for (int i = 0; i < BLOCK_SIZE / sizeof(dir_entry); ++i) {
+        if (strcmp(root[i].file_name, filepath1.c_str()) == 0) idx1 = i;
+        if (strcmp(root[i].file_name, filepath2.c_str()) == 0) idx2 = i;
+    }
+
+    if (idx1 == -1 || idx2 == -1) {
+        std::cout << "Error: One or both files not found.\n";
+        return -1;
+    }
+
+    // Si origen está vacío, nada que hacer
+    if (root[idx1].size == 0) return 0;
+
+    // 3. Preparar lectura de File 1
+    int currSrc = root[idx1].first_blk;
+    int srcSize = root[idx1].size;
+    int srcRead = 0;
+
+    // 4. Preparar escritura en File 2
+    // Necesitamos encontrar el último bloque de File 2
+    int currDest = root[idx2].first_blk;
+    int lastDest = -1;
+
+    // Si File 2 está vacío, hay que asignar el primer bloque
+    if (root[idx2].size == 0 || currDest == FAT_EOF || currDest == 0) {
+        // Buscar bloque libre
+        int newBlk = -1;
+        for (int k = 2; k < disk.get_no_blocks(); ++k) {
+            if (fat[k] == FAT_FREE) { newBlk = k; break; }
+        }
+        if (newBlk == -1) { std::cout << "Disk full.\n"; return -1; }
+        
+        fat[newBlk] = FAT_EOF;
+        root[idx2].first_blk = newBlk;
+        currDest = newBlk;
+        lastDest = newBlk;
+    } else {
+        // Recorrer FAT hasta el final
+        while (fat[currDest] != FAT_EOF) {
+            currDest = fat[currDest];
+        }
+        lastDest = currDest;
+    }
+
+    // Calcular offset en el último bloque de destino
+    int offset = root[idx2].size % BLOCK_SIZE;
+    // Si el archivo es multiplo exacto de BLOCK_SIZE y no es 0, offset será 0.
+    // Pero en ese caso el bloque está lleno, necesitamos uno nuevo.
+    // Lógica simplificada: Leemos el último bloque al buffer.
+    
+    uint8_t destBuf[BLOCK_SIZE];
+    disk.read(lastDest, destBuf);
+
+    // Bucle para leer todo el Source y escribir en Dest
+    uint8_t srcBuf[BLOCK_SIZE];
+    
+    while (srcRead < srcSize) {
+        // Leer bloque actual de source
+        disk.read(currSrc, srcBuf);
+        
+        // Cuánto queda por leer de este bloque source
+        int bytesInSrcBlock = std::min((int)BLOCK_SIZE, srcSize - srcRead);
+        int srcBlockOffset = 0; // Posición dentro del buffer de lectura
+
+        while (bytesInSrcBlock > 0) {
+            // Cuánto cabe en el bloque actual de destino
+            int spaceInDest = BLOCK_SIZE - offset;
+
+            // Si el bloque destino está lleno, asignar uno nuevo
+            if (spaceInDest == 0) {
+                disk.write(lastDest, destBuf); // Guardar el lleno
+
+                int newBlk = -1;
+                for (int k = 2; k < disk.get_no_blocks(); ++k) {
+                    if (fat[k] == FAT_FREE) { newBlk = k; break; }
+                }
+                if (newBlk == -1) {
+                    std::cout << "Disk full during append.\n";
+                    // Actualizar tamaño hasta donde llegamos y guardar
+                    root[idx2].size += (srcRead - bytesInSrcBlock); // Ajuste aproximado
+                    disk.write(FAT_BLOCK, (uint8_t*)fat);
+                    disk.write(ROOT_BLOCK, (uint8_t*)root);
+                    return -1;
+                }
+
+                fat[lastDest] = newBlk; // Enlazar
+                fat[newBlk] = FAT_EOF;
+                lastDest = newBlk;
+                
+                // Resetear buffer destino y offset
+                memset(destBuf, 0, BLOCK_SIZE);
+                offset = 0;
+                spaceInDest = BLOCK_SIZE;
+            }
+
+            // Copiar lo que quepa
+            int toCopy = std::min(bytesInSrcBlock, spaceInDest);
+            memcpy(destBuf + offset, srcBuf + srcBlockOffset, toCopy);
+
+            offset += toCopy;
+            srcBlockOffset += toCopy;
+            bytesInSrcBlock -= toCopy;
+            srcRead += toCopy;
+            root[idx2].size += toCopy;
+        }
+
+        // Avanzar al siguiente bloque de source
+        currSrc = fat[currSrc];
+    }
+
+    // Escribir el último bloque de destino (que puede estar parcialmente lleno)
+    disk.write(lastDest, destBuf);
+
+    // 5. Guardar metadatos
+    disk.write(FAT_BLOCK, (uint8_t*)fat);
+    disk.write(ROOT_BLOCK, (uint8_t*)root);
+
     return 0;
+    
+    std::cout << "FS::append(" << filepath1 << "," << filepath2 << ")\n";
 }
 
 // mkdir <dirpath> creates a new sub-directory with the name <dirpath>
