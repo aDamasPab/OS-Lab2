@@ -620,7 +620,7 @@ int FS::cd(std::string dirpath)
 // directory, including the currect directory name
 int FS::pwd()
 {
-    std::cout << "FS::pwd()\n";
+    std::cout << current_path << std::endl;
     return 0;
 }
 
