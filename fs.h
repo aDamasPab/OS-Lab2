@@ -30,7 +30,8 @@ class FS {
 private:
     Disk disk;
     int16_t fat[BLOCK_SIZE/2]; // size of a FAT entry is 2 bytes
-    uint16_t current_dir_block; // store the current directory block
+    uint16_t current_dir_block = ROOT_BLOCK; // store the current directory block (default is block 0)
+    std ::string current_path = "/"; // full path for the pwd command (default is root)
 
     
     void save_fat(); // saves the FAT from memory to the disk

@@ -76,23 +76,39 @@ FS::~FS()
 // formats the disk, i.e., creates an empty file system
 int FS::format()
 {
-    // initialize FAT
-    for (unsigned i = 0; i < disk.get_no_blocks(); ++i)
-    {
+    // 1. Clear Root Directory (Block 0)
+    uint8_t zeroBlock[BLOCK_SIZE] = {0};
+    // Initialize FAT (assuming this part is done and fat array is loaded)
+    for (int i = 0; i < BLOCK_SIZE/2; ++i) {
         fat[i] = FAT_FREE;
     }
-    // reserve block 0 (root) and block 1 (FAT)
     fat[ROOT_BLOCK] = FAT_EOF;
     fat[FAT_BLOCK] = FAT_EOF;
     save_fat();
 
-    // clean root directory (block 0)
-    uint8_t zero_block[BLOCK_SIZE];
-    memset(zero_block, 0, BLOCK_SIZE);
-    disk.write(ROOT_BLOCK, zero_block);
+    // 2. Initialize Root Directory Entries (., ..)
+    dir_entry* rootEntries = (dir_entry*)zeroBlock;
+    
+    // . (self)
+    strncpy(rootEntries[0].file_name, ".", 56);
+    rootEntries[0].size = 0;
+    rootEntries[0].first_blk = ROOT_BLOCK; 
+    rootEntries[0].type = TYPE_DIR;
+    rootEntries[0].access_rights = READ | WRITE | EXECUTE;
 
-    // restart current position
+    // .. (parent) - In the root directory, '..' points to '.' (itself)
+    strncpy(rootEntries[1].file_name, "..", 56);
+    rootEntries[1].size = 0;
+    rootEntries[1].first_blk = ROOT_BLOCK; 
+    rootEntries[1].type = TYPE_DIR;
+    rootEntries[1].access_rights = READ | WRITE | EXECUTE;
+
+    // 3. Save Root and FAT
+    if (disk.write(ROOT_BLOCK, (uint8_t*)rootEntries) < 0) return -1;
+
+    // 4. Reset CWD state
     current_dir_block = ROOT_BLOCK;
+    current_path = "/";
 
     return 0;
 }
