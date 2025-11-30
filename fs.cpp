@@ -685,7 +685,58 @@ int FS::mkdir(std::string dirpath)
 // cd <dirpath> changes the current (working) directory to the directory named <dirpath>
 int FS::cd(std::string dirpath)
 {
-    std::cout << "FS::cd(" << dirpath << ")\n";
+    // 1. Load CWD
+    uint8_t cwdBuf[BLOCK_SIZE];
+    disk.read(current_dir_block, cwdBuf);
+    dir_entry* cwdEntries = (dir_entry*)cwdBuf;
+
+    int numEntries = BLOCK_SIZE / sizeof(dir_entry);
+
+    // 2. Find the target directory entry
+    int targetIdx = -1;
+    for (int i = 0; i < numEntries; ++i) {
+        if (cwdEntries[i].file_name[0] != '\0' && strcmp(cwdEntries[i].file_name, dirpath.c_str()) == 0) {
+            targetIdx = i;
+            break;
+        }
+    }
+
+    if (targetIdx == -1) {
+        std::cout << "Error: Directory '" << dirpath << "' not found.\n";
+        return -1;
+    }
+
+    // 3. Check if it's actually a directory
+    if (cwdEntries[targetIdx].type != TYPE_DIR) {
+        std::cout << "Error: '" << dirpath << "' is not a directory.\n";
+        return -1;
+    }
+
+    // 4. Update CWD block
+    uint16_t new_dir_block = cwdEntries[targetIdx].first_blk;
+    current_dir_block = new_dir_block;
+
+    // 5. Update current_path (pwd)
+    if (dirpath == "/") {
+        current_path = "/";
+    } else if (dirpath == "..") {
+        if (current_path != "/") {
+            // Find the last '/' and remove the last directory component
+            size_t last_slash = current_path.rfind('/');
+            if (last_slash == 0) { 
+                current_path = "/"; // Went from /dir to /
+            } else { 
+                current_path = current_path.substr(0, last_slash); // Went from /d1/d2 to /d1
+            }
+        }
+    } else if (dirpath != ".") {
+        if (current_path == "/") {
+            current_path += dirpath;
+        } else {
+            current_path += "/" + dirpath;
+        }
+    }
+    
     return 0;
 }
 
