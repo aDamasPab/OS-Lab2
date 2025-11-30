@@ -425,14 +425,14 @@ int FS::mv(std::string sourcepath, std::string destpath)
 // rm <filepath> removes / deletes the file <filepath>
 int FS::rm(std::string filepath)
 {
-    // 1. Cargar
+    // 1. Load
     uint8_t blockBuffer[BLOCK_SIZE];
-    disk.read(ROOT_BLOCK, blockBuffer);
-    dir_entry* root = (dir_entry*)blockBuffer;
+    disk.read(current_dir_block, blockBuffer);
+    dir_entry * root = (dir_entry*)blockBuffer;
     
     disk.read(FAT_BLOCK, (uint8_t*)fat);
 
-    // 2. Buscar archivo
+    // 2. Search for the file or directory entry 
     int idx = -1;
     for (int i = 0; i < BLOCK_SIZE / sizeof(dir_entry); ++i) {
         if (strcmp(root[i].file_name, filepath.c_str()) == 0) {
@@ -446,29 +446,61 @@ int FS::rm(std::string filepath)
         return -1;
     }
 
-    // 3. Liberar bloques en la FAT
-    int curr = root[idx].first_blk;
-    // Asumimos que first_blk es válido si size > 0. 
-    // Si size es 0, first_blk podría ser FAT_EOF o 0, verificamos.
-    if (root[idx].size > 0 && curr != FAT_EOF && curr != 0) {
-        while (curr != FAT_EOF && curr != FAT_FREE) {
-            int next = fat[curr];
-            fat[curr] = FAT_FREE; // Marcar libre
-            curr = next;
+    if (root[idx].type == TYPE_DIR) {
+        // a) Prevent removal of special directories '.' or '..'
+        if (strcmp(filepath.c_str(), ".") == 0 || strcmp(filepath.c_str(), "..") == 0) {
+             std::cout << "Error: Cannot remove special directories '.' or '..'.\n";
+             return -1;
+        }
+
+        uint16_t dirBlk = root[idx].first_blk;
+        uint8_t dirBuf[BLOCK_SIZE];
+        
+        // Load the content of the directory to be removed
+        if (disk.read(dirBlk, dirBuf) < 0) return -1;
+        dir_entry * dirEntries = (dir_entry*)dirBuf;
+        
+        bool isEmpty = true;
+        // Check if the directory is empty. We only check entries starting from index 2, 
+        // as 0 and 1 are always occupied by '.' and '..'.
+        for (int i = 2; i < numEntries; ++i) {
+            if (dirEntries[i].file_name[0] != '\0') {
+                isEmpty = false;
+                break;
+            }
+        }
+
+        if (!isEmpty) {
+            std::cout << "Error: Directory '" << filepath << "' is not empty.\n";
+            return -1;
+        }
+        
+        // If empty, free the single data block used by the directory itself
+        fat[dirBlk] = FAT_FREE;
+        
+    } else {
+        // 3. Free blocks in the FAT
+        int curr = root[idx].first_blk;
+
+        // Only free blocks if size > 0, to handle empty files/initial state
+        if (root[idx].size > 0) {
+            while (curr != FAT_EOF && curr != FAT_FREE && curr != 0) {
+                int next = fat[curr];
+                fat[curr] = FAT_FREE; // Marcar libre
+                curr = next;
+            }
         }
     }
 
-    // 4. Liberar entrada de directorio
-    // Limpiamos todo el struct o solo ponemos el primer char del nombre a 0
+    // 4. Free directory entry in the CWD
+    // Clears the entire dir_entry struct (including setting file_name[0] = '\0')
     memset(&root[idx], 0, sizeof(dir_entry)); 
 
-    // 5. Guardar
+    // 5. Save FAT and CWD
     disk.write(FAT_BLOCK, (uint8_t*)fat);
-    disk.write(ROOT_BLOCK, (uint8_t*)root);
+    disk.write(current_dir_block, (uint8_t*)root);
 
     return 0;
-
-    std::cout << "FS::rm(" << filepath << ")\n";
 }
 
 // append <filepath1> <filepath2> appends the contents of file <filepath1> to
