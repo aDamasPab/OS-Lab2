@@ -270,20 +270,29 @@ int FS::ls()
 {
     // read current directory
     uint8_t dir_buffer[BLOCK_SIZE];
-    if (disk.read(current_dir_block, dir_buffer) != 0)
+    if (disk.read(current_dir_block, dir_buffer) < 0)
     {
         std::cout << "FS::ls(): Error - could not read current directory\n";
         return -1;
     }
 
-    dir_entry *entries = (dir_entry *)dir_buffer;
+    dir_entry * entries = (dir_entry *)dir_buffer;
     int max_entries = BLOCK_SIZE / sizeof(dir_entry);
 
-    std::cout << "name\tsize\n";
-    for (unsigned i = 0; i < max_entries; ++i)
-    {
-        if (entries[i].file_name[0] != '\0')
-            std::cout << entries[i].file_name << "\t" << entries[i].size << "\n";
+    // Print header
+    std::cout << "name\ttype\tsize" << std::endl;
+    std::cout << "----------------------" << std::endl;
+
+    for (int i = 0; i < max_entries; ++i) {
+        if (entries[i].file_name[0] != '\0') {
+            std::cout << entries[i].file_name << "\t";
+            
+            if (entries[i].type == TYPE_DIR) {
+                std::cout << "dir\t-\t" << std::endl;
+            } else { // TYPE_FILE
+                std::cout << "file\t" << entries[i].size << std::endl;
+            }
+        }
     }
 
     return 0;
