@@ -37,7 +37,9 @@ private:
     void save_fat(); // saves the FAT from memory to the disk
     int find_free_block(); // finds a free block in the FAT
     int find_file_in_current_dir(const std::string& filename, dir_entry* entries); // finds a file by name in the current directory. Returns index or -1 if not found
-    int find_free_entry_in_current_dir(dir_entry* entries);  // finds a free entry int the current directory. Returns index or -1 if full
+    int find_free_entry_in_current_dir(dir_entry* entries); // finds a free entry int the current directory. Returns index or -1 if full
+    int parse_path(std::string path, std::string& filename);
+    int find_file_in_dir_block(int block, const std::string& filename);
 
 public:
     FS();
