@@ -520,39 +520,118 @@ int FS::cp(std::string sourcepath, std::string destpath)
 // mv <sourcepath> <destpath> renames the file <sourcepath>
 int FS::mv(std::string sourcepath, std::string destpath)
 {
-    // 1. Load Root (Using ROOT_BLOCK based on provided working version)
-    uint8_t block_buffer[BLOCK_SIZE];
-    disk.read(ROOT_BLOCK, block_buffer);
-    dir_entry* root = (dir_entry*)block_buffer;
+    // --- 1. Resolve Source Path ---
+    std::string src_name; uint16_t src_parent_blk;
+    uint16_t src_blk = resolve_path(sourcepath, src_name, src_parent_blk);
 
-    // 2. Search source
-    int src_idx = -1;
-    for (int i = 0; i < BLOCK_SIZE / sizeof(dir_entry); ++i) {
-        if (strcmp(root[i].file_name, sourcepath.c_str()) == 0) {
-            src_idx = i;
-            break;
-        }
+    if (src_blk == (uint16_t)-1 || src_blk == (uint16_t)-2) { 
+        std::cout << "FS::mv(): Error - source '" << sourcepath << "' not found.\n"; return -1; 
+    }
+    if (src_name == "." || src_name == "..") {
+        std::cout << "FS::mv(): Error - cannot move special directory entries.\n"; return -1;
+    }
+    
+    // Get source entry metadata
+    uint8_t src_parent_buf[BLOCK_SIZE];
+    disk.read(src_parent_blk, src_parent_buf);
+    dir_entry* src_parent_entries = (dir_entry*)src_parent_buf;
+    int src_idx = get_entry_by_name(src_parent_entries, src_name);
+    dir_entry src_entry = src_parent_entries[src_idx];
+
+    // --- 2. Resolve Destination Path ---
+    std::string dest_name; uint16_t dest_parent_blk;
+    uint16_t dest_blk = resolve_path(destpath, dest_name, dest_parent_blk);
+    
+    if (dest_parent_blk == (uint16_t)-1) {
+        std::cout << "FS::mv(): Error - destination path invalid.\n"; return -1;
+    }
+    
+    // Check if the source and destination are the same
+    if (src_parent_blk == dest_parent_blk && src_name == dest_name && dest_blk != (uint16_t)-2) {
+        return 0; // Move to self: no operation needed
     }
 
-    if (src_idx == -1) {
-        std::cout << "Error: File not found.\n";
+    // --- 3. Determine Final Action ---
+    uint16_t final_parent_blk = dest_parent_blk;
+    std::string final_name = dest_name;
+    int dest_target_idx = -1; // Index in the final parent block
+    
+    uint8_t final_parent_buf[BLOCK_SIZE];
+    disk.read(dest_parent_blk, final_parent_buf);
+    dir_entry* final_parent_entries = (dir_entry*)final_parent_buf;
+
+    bool dest_exists = (dest_blk != (uint16_t)-2);
+
+    if (dest_exists) {
+        // Case A: Destination exists.
+        if (final_parent_entries[get_entry_by_name(final_parent_entries, dest_name)].type == TYPE_DIR) {
+            // A1: Destination is a directory. Move INTO the directory (rename/move).
+            final_parent_blk = dest_blk;
+            final_name = src_name; // Keep the original name
+            
+            // Read the new parent directory
+            disk.read(final_parent_blk, final_parent_buf);
+            final_parent_entries = (dir_entry*)final_parent_buf;
+
+            // Check if file already exists in the destination directory
+            if (get_entry_by_name(final_parent_entries, final_name) != -1) {
+                 std::cout << "FS::mv(): Error - '" << final_name << "' already exists in destination directory.\n";
+                 return -1;
+            }
+            dest_target_idx = find_free_entry_in_current_dir(final_parent_entries);
+            
+        } else {
+            // A2: Destination is a file/non-directory. Overwrite/replace (delete dest, use its index).
+            if (src_entry.type == TYPE_DIR) {
+                std::cout << "FS::mv(): Error - cannot overwrite file with a directory.\n"; return -1;
+            }
+            // Free blocks of the old destination file
+            int dest_old_idx = get_entry_by_name(final_parent_entries, dest_name);
+            uint16_t block_to_free = final_parent_entries[dest_old_idx].first_blk;
+            while (block_to_free != FAT_EOF && block_to_free >= 2) {
+                uint16_t next = fat[block_to_free];
+                fat[block_to_free] = FAT_FREE;
+                block_to_free = next;
+            }
+            dest_target_idx = dest_old_idx; // Use the old index
+        }
+    } else {
+        // Case B: Destination does not exist. Rename or move into a new entry slot.
+        dest_target_idx = find_free_entry_in_current_dir(final_parent_entries);
+    }
+    
+    if (dest_target_idx == -1) {
+        std::cout << "FS::mv(): Error - destination directory is full.\n";
         return -1;
     }
 
-    // 3. Verify destination (Noclobber)
-    for (int i = 0; i < BLOCK_SIZE / sizeof(dir_entry); ++i) {
-        if (strcmp(root[i].file_name, destpath.c_str()) == 0) {
-            std::cout << "Error: Destination file already exists.\n";
-            return -1;
+    // --- 4. Move Entry and Update Directory ---
+    dir_entry new_entry = src_entry;
+    strncpy(new_entry.file_name, final_name.c_str(), 56);
+    new_entry.file_name[55] = '\0';
+
+    // Update the '..' pointer in the source directory if it's a directory being moved to a new parent
+    if (src_entry.type == TYPE_DIR && src_parent_blk != final_parent_blk) {
+        uint8_t src_dir_buf[BLOCK_SIZE];
+        disk.read(src_blk, src_dir_buf); // src_blk is the block index of the source directory itself
+        dir_entry* src_dir_entries = (dir_entry*)src_dir_buf;
+        
+        // Find ".." entry (should be at index 1)
+        if (std::string(src_dir_entries[1].file_name) == "..") {
+            src_dir_entries[1].first_blk = final_parent_blk; // Update '..' to point to the new parent
+            disk.write(src_blk, src_dir_buf);
         }
     }
+    
+    // Write new entry into destination parent block
+    final_parent_entries[dest_target_idx] = new_entry;
+    disk.write(final_parent_blk, final_parent_buf);
+    
+    // Clear old entry from source parent block
+    memset(&src_parent_entries[src_idx], 0, sizeof(dir_entry));
+    disk.write(src_parent_blk, src_parent_buf);
 
-    // 4. Rename
-    memset(root[src_idx].file_name, 0, 56);
-    strcpy(root[src_idx].file_name, destpath.c_str());
-
-    // 5. Save
-    disk.write(ROOT_BLOCK, (uint8_t*)root);
+    save_fat(); // FAT entries (file content chain) remain unchanged
 
     return 0;
 }
