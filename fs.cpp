@@ -796,125 +796,151 @@ int FS::rm(std::string filepath)
 // the end of file <filepath2>
 int FS::append(std::string filepath1, std::string filepath2)
 {
-    if (filepath1 == filepath2) {
-        std::cout << "Error: Cannot append file to itself.\n";
-        return -1;
+    // --- 1. Resolve Paths and Check Types ---
+    std::string src_name; uint16_t src_parent_blk;
+    uint16_t src_blk = resolve_path(filepath1, src_name, src_parent_blk);
+
+    std::string dest_name; uint16_t dest_parent_blk;
+    uint16_t dest_blk = resolve_path(filepath2, dest_name, dest_parent_blk);
+
+    if (src_blk == (uint16_t)-1 || src_blk == (uint16_t)-2 || dest_blk == (uint16_t)-1 || dest_blk == (uint16_t)-2) {
+        std::cout << "FS::append(): Error - one or both files not found.\n"; return -1;
     }
 
-    // 1. Load structures (Using ROOT based on provided working version)
-    uint8_t root_buf[BLOCK_SIZE];
-    disk.read(ROOT_BLOCK, root_buf);
-    dir_entry* root = (dir_entry*)root_buf;
-    disk.read(FAT_BLOCK, (uint8_t*)fat);
+    // Get source entry metadata
+    uint8_t src_parent_buf[BLOCK_SIZE]; disk.read(src_parent_blk, src_parent_buf);
+    dir_entry* src_parent_entries = (dir_entry*)src_parent_buf;
+    int src_idx = get_entry_by_name(src_parent_entries, src_name);
+    dir_entry src_entry = src_parent_entries[src_idx];
 
-    // 2. Find files
-    int idx1 = -1, idx2 = -1;
-    for (int i = 0; i < BLOCK_SIZE / sizeof(dir_entry); ++i) {
-        if (strcmp(root[i].file_name, filepath1.c_str()) == 0) idx1 = i;
-        if (strcmp(root[i].file_name, filepath2.c_str()) == 0) idx2 = i;
+    // Get destination entry metadata
+    uint8_t dest_parent_buf[BLOCK_SIZE]; disk.read(dest_parent_blk, dest_parent_buf);
+    dir_entry* dest_parent_entries = (dir_entry*)dest_parent_buf;
+    int dest_idx = get_entry_by_name(dest_parent_entries, dest_name);
+    dir_entry& dest_entry = dest_parent_entries[dest_idx]; // Get reference to modify entry in buffer
+
+    if (src_entry.type != TYPE_FILE || dest_entry.type != TYPE_FILE) {
+        std::cout << "FS::append(): Error - source or destination is not a file.\n"; return -1;
     }
-
-    if (idx1 == -1 || idx2 == -1) {
-        std::cout << "Error: One or both files not found.\n";
-        return -1;
-    }
-
-    // If source is empty, nothing to do
-    if (root[idx1].size == 0) return 0;
-
-    // 3. Prepare File 1 reading
-    int curr_src = root[idx1].first_blk;
-    int src_size = root[idx1].size;
-    int src_read = 0;
-
-    // 4. Prepare File 2 writing
-    int curr_dest = root[idx2].first_blk;
-    int last_dest = -1;
-
-    // If File 2 is empty, allocate first block
-    if (root[idx2].size == 0 || curr_dest == FAT_EOF || curr_dest == 0) {
-        int new_blk = -1;
-        for (int k = 2; k < disk.get_no_blocks(); ++k) {
-            if (fat[k] == FAT_FREE) { new_blk = k; break; }
-        }
-        if (new_blk == -1) { std::cout << "Disk full.\n"; return -1; }
-        
-        fat[new_blk] = FAT_EOF;
-        root[idx2].first_blk = new_blk;
-        curr_dest = new_blk;
-        last_dest = new_blk;
-    } else {
-        // Traverse FAT to end
-        while (fat[curr_dest] != FAT_EOF) {
-            curr_dest = fat[curr_dest];
-        }
-        last_dest = curr_dest;
-    }
-
-    // Calculate offset in last destination block
-    int offset = root[idx2].size % BLOCK_SIZE;
     
-    uint8_t dest_buf[BLOCK_SIZE];
-    disk.read(last_dest, dest_buf);
+    if (src_entry.size == 0) return 0; // Nothing to append
 
-    uint8_t src_buf[BLOCK_SIZE];
+    // --- 2. Find the last block of the destination file ---
+    uint16_t last_dest_block = 0;
+    uint16_t current_dest_block = dest_entry.first_blk;
     
-    while (src_read < src_size) {
-        // Read current source block
-        disk.read(curr_src, src_buf);
+    if (dest_entry.size == 0) {
+        // Destination is empty. We need to allocate a new block and start the chain.
+        // For simplicity, we'll start with the first block of the source as the new first block.
+        // This is a simpler logic that essentially copies the source blocks to destination.
         
-        int bytes_in_src_block = std::min((int)BLOCK_SIZE, src_size - src_read);
-        int src_block_offset = 0; 
+        // First, check if destination had a first block allocated and free it if it was empty
+        if (dest_entry.first_blk != 0 && fat[dest_entry.first_blk] != FAT_FREE) {
+             fat[dest_entry.first_blk] = FAT_FREE;
+        }
+        dest_entry.first_blk = src_entry.first_blk;
+        dest_entry.size = src_entry.size;
+        disk.write(dest_parent_blk, dest_parent_buf);
+        return 0; // Simple case: Destination replaces source content
+    }
 
-        while (bytes_in_src_block > 0) {
-            int space_in_dest = BLOCK_SIZE - offset;
+    // Find the last block in the destination FAT chain
+    while (current_dest_block != FAT_EOF && current_dest_block >= 2) {
+        last_dest_block = current_dest_block;
+        current_dest_block = fat[current_dest_block];
+    }
+    
+    if (last_dest_block == 0) {
+        std::cout << "FS::append(): Error - destination file corrupted (no blocks found).\n"; return -1;
+    }
 
-            // If destination block is full, allocate new one
-            if (space_in_dest == 0) {
-                disk.write(last_dest, dest_buf); 
+    // --- 3. Handle data copy (filling the partial last block of destination) ---
+    
+    // Check space remaining in the last block of the destination file
+    uint32_t last_dest_size_in_bytes = dest_entry.size % BLOCK_SIZE;
+    uint32_t free_space_in_last_block = (last_dest_size_in_bytes == 0) ? 0 : BLOCK_SIZE - last_dest_size_in_bytes;
+    uint32_t bytes_to_append = src_entry.size;
+    uint16_t current_src_block = src_entry.first_blk;
 
-                int new_blk = -1;
-                for (int k = 2; k < disk.get_no_blocks(); ++k) {
-                    if (fat[k] == FAT_FREE) { new_blk = k; break; }
+    if (free_space_in_last_block > 0) {
+        // We have space in the last destination block to fill
+        uint8_t dest_data_buf[BLOCK_SIZE];
+        disk.read(last_dest_block, dest_data_buf); // Read the partial block
+        
+        uint8_t src_data_buf[BLOCK_SIZE];
+        disk.read(current_src_block, src_data_buf); // Read the first source block
+
+        uint32_t copy_amount = std::min(free_space_in_last_block, (uint32_t)BLOCK_SIZE); // Copy up to a full block's worth
+
+        // Copy data from source to fill the gap in destination
+        memcpy(dest_data_buf + last_dest_size_in_bytes, src_data_buf, copy_amount);
+        disk.write(last_dest_block, dest_data_buf); // Write back the filled block
+
+        dest_entry.size += copy_amount;
+        bytes_to_append -= copy_amount;
+
+        // If the source was entirely consumed by filling the gap, we are done
+        if (bytes_to_append == 0) {
+            disk.write(dest_parent_blk, dest_parent_buf);
+            save_fat();
+            return 0;
+        }
+
+        // If the source block was consumed, move to the next source block
+        current_src_block = fat[current_src_block];
+    }
+
+    // --- 4. Append remaining source blocks (or the whole source if no free_space) ---
+    if (bytes_to_append > 0) {
+        // Find the block where the source content starts copying from (already moved to next if first block was partially copied)
+        uint16_t src_copy_start_block = current_src_block;
+        
+        // Find the end of the source file chain (since the source file is unchanged)
+        uint16_t src_end_of_chain = src_copy_start_block;
+        uint16_t next_block_in_src = src_copy_start_block;
+        while (next_block_in_src != FAT_EOF && next_block_in_src >= 2) {
+            src_end_of_chain = next_block_in_src;
+            next_block_in_src = fat[next_block_in_src];
+        }
+        
+        // Find a free block to copy the remaining source chain's blocks to
+        uint16_t new_dest_block = 0;
+        uint16_t prev_new_dest_block = last_dest_block;
+
+        while (current_src_block != FAT_EOF && bytes_to_append > 0) {
+            new_dest_block = find_free_block();
+            if (new_dest_block == -1) {
+                std::cout << "FS::append(): Error - disk full during append. File partially appended.\n";
+                // Link the last block of destination to EOF and clean up allocated blocks
+                if (prev_new_dest_block != last_dest_block) {
+                    fat[prev_new_dest_block] = FAT_EOF;
                 }
-                if (new_blk == -1) {
-                    std::cout << "Disk full during append.\n";
-                    root[idx2].size += (src_read - bytes_in_src_block); 
-                    disk.write(FAT_BLOCK, (uint8_t*)fat);
-                    disk.write(ROOT_BLOCK, (uint8_t*)root);
-                    return -1;
-                }
-
-                fat[last_dest] = new_blk; // Link
-                fat[new_blk] = FAT_EOF;
-                last_dest = new_blk;
-                
-                memset(dest_buf, 0, BLOCK_SIZE);
-                offset = 0;
-                space_in_dest = BLOCK_SIZE;
+                dest_entry.size -= bytes_to_append; // Update size to reflect what was actually written
+                disk.write(dest_parent_blk, dest_parent_buf);
+                save_fat();
+                return -1;
             }
 
-            // Copy what fits
-            int to_copy = std::min(bytes_in_src_block, space_in_dest);
-            memcpy(dest_buf + offset, src_buf + src_block_offset, to_copy);
-
-            offset += to_copy;
-            src_block_offset += to_copy;
-            bytes_in_src_block -= to_copy;
-            src_read += to_copy;
-            root[idx2].size += to_copy;
+            // Copy data and link in FAT
+            uint8_t temp_buf[BLOCK_SIZE];
+            disk.read(current_src_block, temp_buf);
+            disk.write(new_dest_block, temp_buf);
+            
+            fat[prev_new_dest_block] = new_dest_block;
+            prev_new_dest_block = new_dest_block;
+            
+            bytes_to_append -= BLOCK_SIZE;
+            current_src_block = fat[current_src_block];
         }
-
-        // Advance to next source block
-        curr_src = fat[curr_src];
+        
+        // Mark the new last block as EOF
+        fat[prev_new_dest_block] = FAT_EOF;
     }
-
-    // Write last block
-    disk.write(last_dest, dest_buf);
-
-    // 5. Save metadata
-    disk.write(FAT_BLOCK, (uint8_t*)fat);
-    disk.write(ROOT_BLOCK, (uint8_t*)root);
+    
+    // --- 5. Update Destination Metadata ---
+    dest_entry.size += src_entry.size;
+    disk.write(dest_parent_blk, dest_parent_buf);
+    save_fat();
 
     return 0;
 }
