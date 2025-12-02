@@ -327,29 +327,49 @@ int FS::create(std::string filepath)
 // cat <filepath> reads the content of a file and prints it on the screen
 int FS::cat(std::string filepath)
 {
-    // read current directory
-    uint8_t dir_buffer[BLOCK_SIZE];
-    disk.read(current_dir_block, dir_buffer);
-    dir_entry *entries = (dir_entry *)dir_buffer;
+    std::string target_name;
+    uint16_t parent_blk;
 
-    // find file in current directory
-    int idx = find_file_in_current_dir(filepath, entries);
-    if (idx == -1)
-    {
-        std::cout << "FS::cat(): Error - file not found\n";
+    // 1. Resolve the path
+    uint16_t target_blk = resolve_path(filepath, target_name, parent_blk);
+
+    if (target_blk == (uint16_t)-1 || target_blk == (uint16_t)-2) {
+        std::cout << "FS::cat(): Error - file not found or path is invalid.\n";
+        return -1;
+    }
+    
+    // 2. Read the parent directory entry to get metadata (type and size)
+    uint8_t parent_buf[BLOCK_SIZE];
+    disk.read(parent_blk, parent_buf);
+    dir_entry* entries = (dir_entry*)parent_buf;
+    int max_entries = BLOCK_SIZE / sizeof(dir_entry);
+    
+    int target_idx = -1;
+    dir_entry target_entry;
+    
+    for(int i = 0; i < max_entries; ++i) {
+        if (entries[i].file_name[0] != '\0' && target_name == std::string(entries[i].file_name)) {
+            target_idx = i;
+            target_entry = entries[i]; // Copy the entry data
+            break;
+        }
+    }
+    
+    if (target_idx == -1) {
+        std::cout << "FS::cat(): Error - Internal error finding entry.\n";
         return -1;
     }
 
-    // verify that it is a file
-    if (entries[idx].type != TYPE_FILE)
+    // 3. Verify that it is a file
+    if (target_entry.type != TYPE_FILE)
     {
         std::cout << "FS::cat(): Error - not a file\n";
         return -1;
     }
 
-    // read blocks following the FAT chain
-    uint16_t current_block = entries[idx].first_blk;
-    uint32_t remaining_size = entries[idx].size;
+    // 4. Continue with reading blocks
+    uint16_t current_block = target_entry.first_blk;
+    uint32_t remaining_size = target_entry.size;
 
     if (remaining_size == 0 || current_block == 0 || current_block == FAT_EOF)
         return 0; // empty file
