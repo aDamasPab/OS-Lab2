@@ -766,79 +766,77 @@ int FS::append(std::string filepath1, std::string filepath2)
 // mkdir <dirpath> creates a new sub-directory
 int FS::mkdir(std::string dirpath)
 {
-    // 1. Load CWD and FAT
-    uint8_t cwd_buf[BLOCK_SIZE];
-    disk.read(current_dir_block, cwd_buf);
-    dir_entry* cwd_entries = (dir_entry*)cwd_buf;
-    
-    disk.read(FAT_BLOCK, (uint8_t*)fat);
+    std::string target_name;
+    uint16_t parent_blk;
 
-    int num_entries = BLOCK_SIZE / sizeof(dir_entry);
+    // 1. Resolve the path. We expect the target directory NOT to exist (-2)
+    uint16_t target_blk = resolve_path(dirpath, target_name, parent_blk);
 
-    // 2. Check if name already exists and find a free entry slot
-    int free_entry_idx = -1;
-    for (int i = 0; i < num_entries; ++i) {
-        if (cwd_entries[i].file_name[0] != '\0' && strcmp(cwd_entries[i].file_name, dirpath.c_str()) == 0) {
-            std::cout << "Error: Entry '" << dirpath << "' already exists.\n";
+    if (target_blk != (uint16_t)-2) {
+        if (target_blk == (uint16_t)-1) {
+            std::cout << "FS::mkdir(): Error - invalid path to parent directory.\n";
             return -1;
         }
-        if (cwd_entries[i].file_name[0] == '\0' && free_entry_idx == -1) {
-            free_entry_idx = i;
-        }
+        // Entry already exists.
+        std::cout << "FS::mkdir(): Error - directory '" << dirpath << "' already exists.\n";
+        return -1;
     }
+    
+    // 2. Read the parent directory block and find a free entry slot
+    uint8_t parent_buf[BLOCK_SIZE];
+    if (disk.read(parent_blk, parent_buf) < 0) return -1;
+    dir_entry* parent_entries = (dir_entry*)parent_buf;
 
-    if (free_entry_idx == -1) {
-        std::cout << "Error: Current directory is full.\n";
+    int parent_free_idx = find_free_entry_in_current_dir(parent_entries);
+    if (parent_free_idx == -1) {
+        std::cout << "FS::mkdir(): Error - parent directory is full.\n";
         return -1;
     }
 
-    // 3. Find a free data block for the new directory
-    int new_blk = -1;
-    int fat_size = disk.get_no_blocks();
-    for (int k = 2; k < fat_size; ++k) {
-        if (fat[k] == FAT_FREE) {
-            new_blk = k;
-            break;
-        }
-    }
-    if (new_blk == -1) {
-        std::cout << "Error: Disk is full.\n";
+    // 3. Find a free block for the new directory's entries
+    int new_dir_block_idx = find_free_block();
+    if (new_dir_block_idx == -1) {
+        std::cout << "FS::mkdir(): Error - disk is full, no free block.\n";
         return -1;
     }
 
-    // 4. Create Directory Entries (., ..) in the new block
+    // 4. Initialize the new directory block (crucial for '.' and '..')
     uint8_t new_dir_buf[BLOCK_SIZE];
     memset(new_dir_buf, 0, BLOCK_SIZE);
     dir_entry* new_dir_entries = (dir_entry*)new_dir_buf;
-    
-    // . (self)
+
+    // Entry for '.' (self-reference)
     strncpy(new_dir_entries[0].file_name, ".", 56);
     new_dir_entries[0].size = 0;
-    new_dir_entries[0].first_blk = new_blk; // Points to itself
+    new_dir_entries[0].first_blk = new_dir_block_idx;
     new_dir_entries[0].type = TYPE_DIR;
     new_dir_entries[0].access_rights = READ | WRITE | EXECUTE;
 
-    // .. (parent)
+    // Entry for '..' (parent directory reference)
     strncpy(new_dir_entries[1].file_name, "..", 56);
     new_dir_entries[1].size = 0;
-    new_dir_entries[1].first_blk = current_dir_block; // Points to parent
+    new_dir_entries[1].first_blk = parent_blk; // Points back to the parent block
     new_dir_entries[1].type = TYPE_DIR;
     new_dir_entries[1].access_rights = READ | WRITE | EXECUTE;
 
-    // 5. Update FAT and CWD entry
-    fat[new_blk] = FAT_EOF; // Mark new directory block as occupied
-    
-    // Update CWD entry (the new directory link)
-    strncpy(cwd_entries[free_entry_idx].file_name, dirpath.c_str(), 56);
-    cwd_entries[free_entry_idx].size = 0; 
-    cwd_entries[free_entry_idx].first_blk = new_blk;
-    cwd_entries[free_entry_idx].type = TYPE_DIR;
-    cwd_entries[free_entry_idx].access_rights = READ | WRITE | EXECUTE;
+    // Write the new directory block to disk
+    disk.write(new_dir_block_idx, new_dir_buf);
 
-    // 6. Write back to disk
-    disk.write(new_blk, new_dir_buf);
-    disk.write(current_dir_block, cwd_buf);
-    disk.write(FAT_BLOCK, (uint8_t*)fat);
+    // 5. Create the entry in the parent directory
+    dir_entry new_entry;
+    strncpy(new_entry.file_name, target_name.c_str(), 56);
+    new_entry.file_name[55] = '\0';
+    new_entry.size = 0; 
+    new_entry.first_blk = new_dir_block_idx;
+    new_entry.type = TYPE_DIR;
+    new_entry.access_rights = READ | WRITE | EXECUTE; 
+
+    parent_entries[parent_free_idx] = new_entry;
+    disk.write(parent_blk, parent_buf);
+
+    // 6. Update FAT
+    fat[new_dir_block_idx] = FAT_EOF; // Directory block is self-contained
+    save_fat();
 
     return 0;
 }
