@@ -3,6 +3,7 @@
 #include <cstring>
 #include <string>
 #include <algorithm>
+#include <sstream>
 #include "fs.h"
 
 // ============ PRIVATE AUXILIARY METHODS ============
@@ -60,6 +61,109 @@ int FS::find_free_entry_in_current_dir(dir_entry *entries)
     return -1;
 }
 
+uint16_t FS::resolve_path(const std::string& path, std::string& final_name, uint16_t& parent_block) {
+    if (path.empty()) return (uint16_t)-1;
+
+    // 1. Determine the starting point (Start Node)
+    uint16_t current_block;
+    std::string working_path = path;
+    
+    if (working_path.front() == '/') {
+        current_block = ROOT_BLOCK;
+        // If the path is just "/", return the root block.
+        if (working_path.length() == 1) {
+            final_name = "";
+            parent_block = ROOT_BLOCK;
+            return ROOT_BLOCK;
+        }
+        working_path = working_path.substr(1); // Skip the initial '/'
+    } else {
+        current_block = current_dir_block; // Relative path, start from CWD
+    }
+
+    // 2. Split the path into components
+    // Use a C-style buffer for strtok_r
+    char path_copy[1024];
+    strncpy(path_copy, working_path.c_str(), sizeof(path_copy) - 1);
+    path_copy[sizeof(path_copy) - 1] = '\0';
+
+    char* component;
+    char* saveptr;
+    
+    std::vector<std::string> components;
+    component = strtok_r(path_copy, "/", &saveptr);
+    while (component != NULL) {
+        // Skip empty components resulting from multiple slashes (e.g., "a//b")
+        if (strlen(component) > 0) {
+            components.push_back(component);
+        }
+        component = strtok_r(NULL, "/", &saveptr);
+    }
+    
+    if (components.empty()) {
+        // This handles cases like: "", "/", "./" (if working_path was ".")
+        final_name = "";
+        parent_block = current_block;
+        return current_block;
+    }
+    
+    uint16_t target_block = current_block; 
+    
+    // 3. Traverse all components, except the last one (which is the target entry name)
+    for (size_t i = 0; i < components.size() - 1; ++i) {
+        std::string name = components[i];
+        
+        // Read the current directory block
+        uint8_t dir_buffer[BLOCK_SIZE];
+        if (disk.read(target_block, dir_buffer) < 0) return (uint16_t)-1;
+        dir_entry* entries = (dir_entry*)dir_buffer;
+        int max_entries = BLOCK_SIZE / sizeof(dir_entry);
+        
+        // Find the next component name in the current directory
+        int found_idx = -1;
+        for (int j = 0; j < max_entries; ++j) {
+            if (entries[j].file_name[0] != '\0' && name == std::string(entries[j].file_name)) {
+                found_idx = j;
+                break;
+            }
+        }
+
+        if (found_idx == -1) {
+            // Path invalid: component 'name' not found during navigation.
+            return (uint16_t)-1;
+        }
+
+        // Only directories can be navigated
+        if (entries[found_idx].type != TYPE_DIR) {
+            return (uint16_t)-1;
+        }
+        
+        // Move to the next block (directory). This handles '.' and '..' correctly
+        // because their first_blk points to the correct block.
+        target_block = entries[found_idx].first_blk;
+    }
+
+    // 4. Handle the final component (the target entry itself)
+    final_name = components.back();
+    parent_block = target_block; // The last block we successfully navigated to is the parent
+
+    // Read the parent directory block
+    uint8_t dir_buffer[BLOCK_SIZE];
+    if (disk.read(parent_block, dir_buffer) < 0) return (uint16_t)-1;
+    dir_entry* entries = (dir_entry*)dir_buffer;
+    int max_entries = BLOCK_SIZE / sizeof(dir_entry);
+    
+    // Search for the final name in the parent directory
+    for (int j = 0; j < max_entries; ++j) {
+        if (entries[j].file_name[0] != '\0' && final_name == std::string(entries[j].file_name)) {
+            // Found: return the final entry's block index.
+            return entries[j].first_blk;
+        }
+    }
+    
+    // The final component doesn't exist, but the parent directory does.
+    return (uint16_t)-2;
+    
 // ================= PUBLIC METHODS ==================
 
 FS::FS()
@@ -712,56 +816,94 @@ int FS::mkdir(std::string dirpath)
 // cd <dirpath> changes the current (working) directory
 int FS::cd(std::string dirpath)
 {
-    // 1. Load CWD
-    uint8_t cwd_buf[BLOCK_SIZE];
-    disk.read(current_dir_block, cwd_buf);
-    dir_entry* cwd_entries = (dir_entry*)cwd_buf;
+    std::string target_name;
+    uint16_t parent_blk;
 
-    int num_entries = BLOCK_SIZE / sizeof(dir_entry);
+    // Resolve the path to get the target block index
+    uint16_t target_blk = resolve_path(dirpath, target_name, parent_blk);
 
-    // 2. Find the target directory entry
-    int target_idx = -1;
-    for (int i = 0; i < num_entries; ++i) {
-        if (cwd_entries[i].file_name[0] != '\0' && strcmp(cwd_entries[i].file_name, dirpath.c_str()) == 0) {
-            target_idx = i;
-            break;
-        }
-    }
-
-    if (target_idx == -1) {
-        std::cout << "Error: Directory '" << dirpath << "' not found.\n";
+    if (target_blk == (uint16_t)-1 || target_blk == (uint16_t)-2) {
+        std::cout << "Error: Directory '" << dirpath << "' not found or path is invalid.\n";
         return -1;
     }
 
-    // 3. Check if it's actually a directory
-    if (cwd_entries[target_idx].type != TYPE_DIR) {
-        std::cout << "Error: '" << dirpath << "' is not a directory.\n";
-        return -1;
-    }
-
-    // 4. Update CWD block
-    uint16_t new_dir_block = cwd_entries[target_idx].first_blk;
-    current_dir_block = new_dir_block;
-
-    // 5. Update current_path (pwd)
-    if (dirpath == "/") {
-        current_path = "/";
-    } else if (dirpath == "..") {
-        if (current_path != "/") {
-            // Find the last '/' and remove the last directory component
-            size_t last_slash = current_path.rfind('/');
-            if (last_slash == 0) { 
-                current_path = "/"; // Went from /dir to /
-            } else { 
-                current_path = current_path.substr(0, last_slash); // Went from /d1/d2 to /d1
+    // If target_name is not empty, check if the entry is a directory.
+    // If target_name is empty (only possible for path="/"), we know it's a directory (ROOT_BLOCK).
+    if (!target_name.empty()) {
+        uint8_t parent_buf[BLOCK_SIZE];
+        disk.read(parent_blk, parent_buf);
+        dir_entry* entries = (dir_entry*)parent_buf;
+        int max_entries = BLOCK_SIZE / sizeof(dir_entry);
+        
+        int target_idx = -1;
+        for(int i = 0; i < max_entries; ++i) {
+            if (entries[i].file_name[0] != '\0' && target_name == std::string(entries[i].file_name)) {
+                target_idx = i;
+                break;
             }
         }
-    } else if (dirpath != ".") {
-        if (current_path == "/") {
-            current_path += dirpath;
-        } else {
-            current_path += "/" + dirpath;
+        
+        if (target_idx == -1 || entries[target_idx].type != TYPE_DIR) {
+            std::cout << "Error: '" << dirpath << "' is not a directory or internal error.\n";
+            return -1;
         }
+    }
+    
+    // 3. Update CWD block
+    current_dir_block = target_blk;
+
+    // 4. Update current_path (pwd string) by normalizing the path components.
+    
+    // Start with the appropriate path (current_path for relative, "/" for absolute)
+    std::string full_path;
+    if (dirpath.front() == '/') {
+        full_path = "/";
+    } else {
+        full_path = current_path;
+    }
+    
+    // Normalize the path (remove '..' and '.')
+    std::vector<std::string> path_components;
+    
+    // Lambda function to split and process path components from a given path string
+    auto process_path = [&](const std::string& path_str) {
+        char path_copy[1024];
+        strncpy(path_copy, path_str.c_str(), sizeof(path_copy) - 1);
+        path_copy[sizeof(path_copy) - 1] = '\0';
+        
+        char* component;
+        char* saveptr;
+        
+        component = strtok_r(path_copy, "/", &saveptr);
+        while (component != NULL) {
+            std::string comp_str = component;
+            if (comp_str == "..") {
+                if (!path_components.empty()) {
+                    path_components.pop_back(); // Go up one level
+                }
+            } else if (comp_str != "." && !comp_str.empty()) {
+                path_components.push_back(comp_str); // Go down
+            }
+            component = strtok_r(NULL, "/", &saveptr);
+        }
+    };
+    
+    // Process current path components first if relative path is used
+    if (dirpath.front() != '/') {
+        process_path(full_path);
+    }
+    
+    // Process new path components
+    process_path(dirpath);
+    
+    // Rebuild the final path string
+    current_path = "/";
+    for (const std::string& comp : path_components) {
+        current_path += comp + "/";
+    }
+    
+    if (current_path.length() > 1 && current_path.back() == '/') {
+        current_path.pop_back(); // Remove trailing slash unless it is the root
     }
     
     return 0;

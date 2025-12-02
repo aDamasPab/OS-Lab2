@@ -39,6 +39,12 @@ private:
     int find_file_in_current_dir(const std::string& filename, dir_entry* entries); // finds a file by name in the current directory. Returns index or -1 if not found
     int find_free_entry_in_current_dir(dir_entry* entries);  // finds a free entry int the current directory. Returns index or -1 if full
 
+    // NEW HELPER FUNCTION for Task 4: Path Resolution
+    // Returns the block index of the final entry if found.
+    // Returns -1 ((uint16_t)-1) if the path is invalid (component not found, or not a directory for navigation).
+    // Returns -2 ((uint16_t)-2) if the path's parent exists, but the final entry does not (for 'create', 'mkdir').
+    uint16_t resolve_path(const std::string& path, std::string& final_name, uint16_t& parent_block);
+
 public:
     FS();
     ~FS();
