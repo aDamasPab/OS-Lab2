@@ -560,78 +560,82 @@ int FS::mv(std::string sourcepath, std::string destpath)
 // rm <filepath> removes / deletes the file <filepath>
 int FS::rm(std::string filepath)
 {
-    // 1. Load CWD
-    uint8_t block_buffer[BLOCK_SIZE];
-    disk.read(current_dir_block, block_buffer);
-    dir_entry * root = (dir_entry*)block_buffer;
-    
-    disk.read(FAT_BLOCK, (uint8_t*)fat);
+    std::string target_name;
+    uint16_t parent_blk;
 
-    // 2. Search for the file or directory entry 
-    int idx = -1;
-    for (int i = 0; i < BLOCK_SIZE / sizeof(dir_entry); ++i) {
-        if (strcmp(root[i].file_name, filepath.c_str()) == 0) {
-            idx = i;
-            break;
-        }
-    }
+    // 1. Resolve the path. We expect the target entry to exist.
+    uint16_t target_blk = resolve_path(filepath, target_name, parent_blk);
 
-    if (idx == -1) {
-        std::cout << "Error: File not found.\n";
+    if (target_blk == (uint16_t)-1 || target_blk == (uint16_t)-2) {
+        std::cout << "FS::rm(): Error - file or directory '" << filepath << "' not found.\n";
         return -1;
     }
 
-    if (root[idx].type == TYPE_DIR) {
-        // a) Prevent removal of special directories '.' or '..'
-        if (strcmp(filepath.c_str(), ".") == 0 || strcmp(filepath.c_str(), "..") == 0) {
-             std::cout << "Error: Cannot remove special directories '.' or '..'.\n";
+    // 2. Read the parent directory block
+    uint8_t parent_buf[BLOCK_SIZE];
+    if (disk.read(parent_blk, parent_buf) < 0) return -1;
+    dir_entry* entries = (dir_entry*)parent_buf;
+    int max_entries = BLOCK_SIZE / sizeof(dir_entry);
+    
+    // 3. Find the entry index in the parent block
+    int target_idx = -1;
+    for(int i = 0; i < max_entries; ++i) {
+        if (entries[i].file_name[0] != '\0' && target_name == std::string(entries[i].file_name)) {
+            target_idx = i;
+            break;
+        }
+    }
+    
+    if (target_idx == -1) {
+        std::cout << "FS::rm(): Error - internal error finding entry.\n";
+        return -1;
+    }
+    
+    dir_entry entry_to_remove = entries[target_idx];
+    
+    // 4. Check for special directory names or non-empty directory
+    if (entry_to_remove.type == TYPE_DIR) {
+        // Prevent removal of root, '.', or '..' entries
+        if (entry_to_remove.first_blk == ROOT_BLOCK || target_name == "." || target_name == "..") {
+             std::cout << "FS::rm(): Error - cannot remove root or special directory entries.\n";
              return -1;
         }
-
-        uint16_t dir_blk = root[idx].first_blk;
-        uint8_t dir_buf[BLOCK_SIZE];
         
-        // Load the content of the directory to be removed
-        if (disk.read(dir_blk, dir_buf) < 0) return -1;
-        dir_entry * dir_entries = (dir_entry*)dir_buf;
+        // Check if the directory is empty (besides '.' and '..')
+        uint8_t target_buf[BLOCK_SIZE];
+        disk.read(entry_to_remove.first_blk, target_buf);
+        dir_entry* target_entries = (dir_entry*)target_buf;
         
         bool is_empty = true;
-        // Check if the directory is empty (ignore first 2 entries: . and ..)
-        for (int i = 2; i < BLOCK_SIZE / sizeof(dir_entry); ++i) {
-            if (dir_entries[i].file_name[0] != '\0') {
+        for (int i = 0; i < max_entries; ++i) {
+            if (target_entries[i].file_name[0] != '\0' && 
+                std::string(target_entries[i].file_name) != "." && 
+                std::string(target_entries[i].file_name) != "..") {
                 is_empty = false;
                 break;
             }
         }
-
+        
         if (!is_empty) {
-            std::cout << "Error: Directory '" << filepath << "' is not empty.\n";
+            std::cout << "FS::rm(): Error - directory is not empty.\n";
             return -1;
         }
-        
-        // If empty, free the single data block used by the directory itself
-        fat[dir_blk] = FAT_FREE;
-        
-    } else {
-        // 3. Free blocks in the FAT
-        int curr = root[idx].first_blk;
-
-        // Only free blocks if size > 0
-        if (root[idx].size > 0) {
-            while (curr != FAT_EOF && curr != FAT_FREE && curr != 0) {
-                int next = fat[curr];
-                fat[curr] = FAT_FREE; // Mark free
-                curr = next;
-            }
-        }
+    }
+    
+    // 5. Free the disk blocks associated with the file/directory
+    uint16_t current_block = entry_to_remove.first_blk;
+    while (current_block != FAT_EOF && current_block >= 2) {
+        uint16_t next_block = fat[current_block];
+        fat[current_block] = FAT_FREE;
+        current_block = next_block;
     }
 
-    // 4. Free directory entry in the CWD
-    memset(&root[idx], 0, sizeof(dir_entry)); 
-
-    // 5. Save FAT and CWD
-    disk.write(FAT_BLOCK, (uint8_t*)fat);
-    disk.write(current_dir_block, (uint8_t*)root);
+    // 6. Clear the entry in the parent directory
+    memset(&entries[target_idx], 0, sizeof(dir_entry));
+    disk.write(parent_blk, parent_buf);
+    
+    // 7. Save updated FAT
+    save_fat();
 
     return 0;
 }
