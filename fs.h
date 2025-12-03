@@ -2,6 +2,7 @@
 #include <vector>
 #include <cstring>
 #include <cstdint>
+#include <string>
 #include "disk.h"
 
 #ifndef __FS_H__
@@ -38,6 +39,7 @@ private:
     int find_free_block(); // finds a free block in the FAT
     int find_file_in_current_dir(const std::string& filename, dir_entry* entries); // finds a file by name in the current directory. Returns index or -1 if not found
     int find_free_entry_in_current_dir(dir_entry* entries);  // finds a free entry int the current directory. Returns index or -1 if full
+    int get_entry_by_name(dir_entry* entries, const std::string& name); // helper: find index by name in given dir block
 
     // NEW HELPER FUNCTION for Task 4: Path Resolution
     // Returns the block index of the final entry if found.

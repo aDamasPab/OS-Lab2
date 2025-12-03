@@ -61,6 +61,20 @@ int FS::find_free_entry_in_current_dir(dir_entry *entries)
     return -1;
 }
 
+int FS::get_entry_by_name(dir_entry *entries, const std::string &name)
+{
+    int max_entries = BLOCK_SIZE / sizeof(dir_entry);
+    for (int i = 0; i < max_entries; ++i)
+    {
+        if (entries[i].file_name[0] != '\0')
+        {
+            if (name == std::string(entries[i].file_name))
+                return i;
+        }
+    }
+    return -1;
+}
+
 uint16_t FS::resolve_path(const std::string& path, std::string& final_name, uint16_t& parent_block) {
     if (path.empty()) return (uint16_t)-1;
 
@@ -163,7 +177,9 @@ uint16_t FS::resolve_path(const std::string& path, std::string& final_name, uint
     
     // The final component doesn't exist, but the parent directory does.
     return (uint16_t)-2;
-    
+
+}
+
 // ================= PUBLIC METHODS ==================
 
 FS::FS()
