@@ -4,6 +4,7 @@
 #include <string>
 #include <algorithm>
 #include <sstream>
+#include <cctype>
 #include "fs.h"
 
 // ============ PRIVATE AUXILIARY METHODS ============
@@ -184,6 +185,44 @@ uint16_t FS::resolve_path(const std::string &path, std::string &final_name, uint
     return (uint16_t)-2;
 }
 
+// Función auxiliar para comparar cadenas con orden natural
+bool natural_compare(const std::string& a, const std::string& b) {
+    size_t i = 0, j = 0;
+    while (i < a.length() && j < b.length()) {
+        // Si ambos caracteres son dígitos, leemos los números completos
+        if (std::isdigit(a[i]) && std::isdigit(b[j])) {
+            unsigned long numA = 0;
+            unsigned long numB = 0;
+            
+            // Extraer número de A
+            while (i < a.length() && std::isdigit(a[i])) {
+                numA = numA * 10 + (a[i] - '0');
+                i++;
+            }
+            // Extraer número de B
+            while (j < b.length() && std::isdigit(b[j])) {
+                numB = numB * 10 + (b[j] - '0');
+                j++;
+            }
+
+            if (numA != numB) {
+                return numA < numB;
+            }
+            // Si los números son iguales, continuamos el bucle desde donde quedamos
+        } 
+        else {
+            // Comparación normal de caracteres
+            if (a[i] != b[j]) {
+                return a[i] < b[j];
+            }
+            i++;
+            j++;
+        }
+    }
+    // Si una cadena es prefijo de la otra (ej: "file" vs "file2"), la más corta va primero
+    return a.length() < b.length();
+}
+
 // ================= PUBLIC METHODS ==================
 
 FS::FS()
@@ -213,7 +252,7 @@ int FS::format()
     dir_entry *root_entries = (dir_entry *)zero_block;
 
     // Initialize "." and ".." entries
-    strncpy(root_entries[0].file_name, ".", 56);
+    /*strncpy(root_entries[0].file_name, ".", 56);
     root_entries[0].first_blk = ROOT_BLOCK;
     root_entries[0].type = TYPE_DIR;
     root_entries[0].access_rights = READ | WRITE | EXECUTE;
@@ -221,7 +260,8 @@ int FS::format()
     strncpy(root_entries[1].file_name, "..", 56);
     root_entries[1].first_blk = ROOT_BLOCK;
     root_entries[1].type = TYPE_DIR;
-    root_entries[1].access_rights = READ | WRITE | EXECUTE;
+    root_entries[1].access_rights = READ | WRITE | EXECUTE; 
+    */
 
     if (disk.write(ROOT_BLOCK, (uint8_t *)root_entries) < 0)
         return -1;
@@ -264,7 +304,6 @@ int FS::create(std::string filepath)
     // Read file content from stdin
     std::string content = "";
     std::string line;
-    std::cout << "Enter data. Empty line to end.\n";
     while (std::getline(std::cin, line))
     {
         if (line.empty())
@@ -381,7 +420,7 @@ int FS::cat(std::string filepath)
         remaining_size -= to_print;
         current_block = fat[current_block];
     }
-    std::cout << std::endl;
+    // std::cout << std::endl;
 
     return 0;
 }
@@ -394,28 +433,49 @@ int FS::ls()
     dir_entry *entries = (dir_entry *)dir_buffer;
     int max_entries = BLOCK_SIZE / sizeof(dir_entry);
 
-    std::cout << "name\ttype\taccessrights\tsize" << std::endl;
-    std::cout << "---------------------------------------------" << std::endl;
+    // 1. Crear un vector para almacenar temporalmente las entradas válidas
+    std::vector<dir_entry> valid_entries;
 
     for (int i = 0; i < max_entries; ++i)
     {
+        // Solo procesamos si la entrada no está vacía
         if (entries[i].file_name[0] != '\0')
         {
             std::string name = entries[i].file_name;
+            
+            // Si quieres seguir ocultando . y .., mantén esto:
             if (name == "." || name == "..")
                 continue;
 
-            std::cout << name << "\t";
-            std::cout << ((entries[i].type == TYPE_DIR) ? "dir\t" : "file\t");
-
-            // Print Access Rights
-            uint8_t r = entries[i].access_rights;
-            std::cout << ((r & READ) ? "r" : "-");
-            std::cout << ((r & WRITE) ? "w" : "-");
-            std::cout << ((r & EXECUTE) ? "x" : "-");
-
-            std::cout << "\t" << entries[i].size << std::endl;
+            // Guardamos la estructura completa en el vector
+            valid_entries.push_back(entries[i]);
         }
+    }
+
+    // 2. Ordenar el vector de forma natural
+    std::sort(valid_entries.begin(), valid_entries.end(), [](const dir_entry& a, const dir_entry& b) {
+        std::string nameA = a.file_name;
+        std::string nameB = b.file_name;
+        return natural_compare(nameA, nameB);
+    });
+
+    std::cout << "name\ttype\taccessrights\tsize" << std::endl;
+    std::cout << "---------------------------------------------" << std::endl;
+
+    for (const auto& entry : valid_entries)
+    {
+        std::string name = entry.file_name;
+        
+        std::cout << name << "\t";
+        std::cout << ((entry.type == TYPE_DIR) ? "dir\t" : "file\t");
+
+        // Print Access Rights
+        uint8_t r = entry.access_rights;
+        std::cout << ((r & READ) ? "r" : "-");
+        std::cout << ((r & WRITE) ? "w" : "-");
+        std::cout << ((r & EXECUTE) ? "x" : "-");
+
+        std::cout << "\t" << entry.size << std::endl;
     }
 
     return 0;
@@ -740,10 +800,18 @@ int FS::append(std::string filepath1, std::string filepath2)
         return -1;
 
     // Check Perms
+    if (!(src_ent->access_rights & READ) || !(dest_ent->access_rights & WRITE)) {
+        std::cout << "FS::append(): Error - permission denied.\n";
+        return -1;
+    }
+    
+    /*
     if (!(src_ent->access_rights & READ))
         return -1;
+
     if (!(dest_ent->access_rights & WRITE))
         return -1;
+    */
 
     if (src_ent->size == 0)
         return 0;
@@ -944,11 +1012,19 @@ int FS::cd(std::string dirpath)
     }
     else if (dirpath != ".")
     {
+        if (dirpath.front() == '/')
+        {
+            // Absolute path
+            current_path = dirpath;
+            return 0;
+        }
         // Go down one level. Append target_name to current_path
         if (current_path == "/")
             current_path += target_name.empty() ? "" : target_name;
-        else
+        else {
             current_path += "/" + target_name;
+        }
+            
     }
     
     return 0;
