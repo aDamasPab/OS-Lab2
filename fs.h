@@ -41,7 +41,6 @@ private:
     int find_free_entry_in_current_dir(dir_entry* entries);  // finds a free entry int the current directory. Returns index or -1 if full
     int get_entry_by_name(dir_entry* entries, const std::string& name); // helper: find index by name in given dir block
 
-    // NEW HELPER FUNCTION for Task 4: Path Resolution
     // Returns the block index of the final entry if found.
     // Returns -1 ((uint16_t)-1) if the path is invalid (component not found, or not a directory for navigation).
     // Returns -2 ((uint16_t)-2) if the path's parent exists, but the final entry does not (for 'create', 'mkdir').
